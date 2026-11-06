@@ -1,0 +1,51 @@
+# ETHGlobal Mumbai demo instance. Lives next to production on the VPS and
+# never touches it: its own database, its own subdomain, and every Celo
+# contract address built as zero, so it cannot send a Celo transaction or
+# settle a hex on the production contracts. Analytics and Sentry are off so
+# demo traffic does not mix with real players.
+#
+# Build context is this repo's checkout on branch ethglobal-mumbai.
+#   docker compose -f ops/mumbai/docker-compose.mumbai.yml --env-file ops/mumbai/.env.build up -d --build
+services:
+  miniklaim-mumbai:
+    build: &build
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: https://mumbai.miniklaim.fun
+        NEXT_PUBLIC_CELO_HEXES_ADDRESS: "0x0000000000000000000000000000000000000000"
+        NEXT_PUBLIC_CELO_BADGES_ADDRESS: "0x0000000000000000000000000000000000000000"
+        NEXT_PUBLIC_CELO_CLAIM_ROUTER_ADDRESS: "0x0000000000000000000000000000000000000000"
+        NEXT_PUBLIC_CELO_DROPS_ADDRESS: "0x0000000000000000000000000000000000000000"
+        NEXT_PUBLIC_SONEIUM_HEXES_ADDRESS: "0x0000000000000000000000000000000000000000"
+        NEXT_PUBLIC_SONEIUM_BADGES_ADDRESS: "0x0000000000000000000000000000000000000000"
+        NEXT_PUBLIC_TREASURES: "off"
+        NEXT_PUBLIC_POSTHOG_KEY: ""
+        NEXT_PUBLIC_SENTRY_DSN: ""
+        NEXT_PUBLIC_HEX_STRENGTH: "on"
+        BUILD_COMMIT_SHA: ${BUILD_COMMIT_SHA:-}
+    container_name: miniklaim-mumbai
+    expose: ["3000"]
+    env_file: .env.miniklaim-mumbai
+    restart: always
+    cpu_shares: 1024
+    networks: [shared]
+    deploy: {resources: {limits: {memory: 4096m}}}
+
+  # Arkiv writer + ENS title loop (scripts/arkiv-sync.ts).
+  miniklaim-mumbai-sync:
+    build: *build
+    image: miniklaim-mumbai-cron:latest
+    container_name: miniklaim-mumbai-sync
+    env_file: .env.miniklaim-mumbai
+    environment:
+      LOG_LEVEL: info
+    command: ["sh", "-c", "while true; do npm run arkiv:sync || true; sleep 5; done"]
+    restart: always
+    cpu_shares: 512
+    networks: [shared]
+    deploy: {resources: {limits: {memory: 512m}}}
+
+networks:
+  shared:
+    external: true

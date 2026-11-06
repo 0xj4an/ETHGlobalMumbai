@@ -7,9 +7,11 @@ import { countryForHex } from "@/lib/geo/country";
 import { detectDrops, type FoundDrop } from "@/lib/drops/detect";
 import { createLogger } from "@/lib/logger";
 import { hexClaimAction } from "@/lib/runs/claimDecision";
-import { isHexStrengthEnabled } from "@/lib/runs/hexStrength";
+import { isHexStrengthEnabled, playerKey } from "@/lib/runs/hexStrength";
 import { isMoveMode, tooFastForMode } from "@/lib/runs/moveMode";
 import { applyStrengthBatch } from "@/lib/runs/strengthClaim";
+import { isWorldGateEnabled } from "@/lib/world/config";
+import { isPlayerVerified } from "@/lib/world/verified";
 import { addressesForPlayer } from "@/lib/players";
 import { validateClaim } from "@/lib/runs/validation";
 import {
@@ -239,6 +241,7 @@ export async function POST(
   const strengthRows: Array<{ h3: string; row: (typeof results)[number] }> = [];
   let reinforcedDelta = 0;
   let damagedDelta = 0;
+  let blockedByWorld = 0;
   let newlyCaptured = 0;
   let distanceDelta = 0;
   let conquestDelta = 0;
@@ -351,10 +354,14 @@ export async function POST(
       .from(users)
       .where(eq(users.address, run.userAddress))
       .limit(1);
+    const canAttack = isWorldGateEnabled()
+      ? await isPlayerVerified(playerKey(playerAddresses, run.userAddress))
+      : true;
     const applied = await applyStrengthBatch(db, {
       runId: id,
       actor: run.userAddress,
       playerAddresses,
+      canAttack,
       timeZone: actor?.timeZone ?? null,
       h3Ids: strengthRows.map((r) => r.h3),
       geo: (h3) => {
@@ -381,6 +388,7 @@ export async function POST(
     conquestDelta += applied.conquests;
     reinforcedDelta = applied.reinforced;
     damagedDelta = applied.damaged;
+    blockedByWorld = applied.blocked;
   }
 
   if (toWrite.length > 0) {
@@ -524,5 +532,7 @@ export async function POST(
     ok: true,
     results,
     ...(foundDrops.length > 0 ? { drops: foundDrops } : {}),
+    // Attacks that did not count until the player verifies with World ID.
+    ...(blockedByWorld > 0 ? { worldRequired: blockedByWorld } : {}),
   });
 }

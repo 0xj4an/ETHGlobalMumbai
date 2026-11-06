@@ -299,6 +299,8 @@ export default function RunPage() {
   const [footTooFast, setFootTooFast] = useState(false);
   // Treasures this run won, shown with a one-tap claim.
   const [foundTreasures, setFoundTreasures] = useState<FoundTreasure[]>([]);
+  // ETHGlobal Mumbai: attacks that did not count without a World ID proof.
+  const [worldBlocked, setWorldBlocked] = useState(0);
   const footTooFastTimer = useRef<number | null>(null);
   const modeWarnedRef = useRef(false);
   const footWarnedRef = useRef(false);
@@ -736,8 +738,13 @@ export default function RunPage() {
         const data = (await res.json()) as {
           results: ClaimResultRow[];
           drops?: FoundTreasure[];
+          worldRequired?: number;
         };
         outcome = { kind: "ok", results: data.results ?? [] };
+        if (typeof data.worldRequired === "number" && data.worldRequired > 0) {
+          const n = data.worldRequired;
+          setWorldBlocked((prev) => prev + n);
+        }
         if (Array.isArray(data.drops) && data.drops.length > 0) {
           const won = data.drops;
           for (const d of won) {
@@ -1893,6 +1900,25 @@ export default function RunPage() {
         found={foundTreasures}
         onClose={() => setFoundTreasures([])}
       />
+      {worldBlocked > 0 && (
+        <div
+          role="status"
+          className="absolute top-28 right-4 left-4 z-20 rounded-md border border-amber-300 bg-amber-50 p-3 text-center text-xs font-medium text-amber-900 shadow-md"
+        >
+          {worldBlocked} {worldBlocked === 1 ? "attack" : "attacks"} did not count: attacking needs World ID.{" "}
+          <a href="/mumbai#world" className="underline">
+            Verify
+          </a>
+          <button
+            type="button"
+            className="ml-2 text-amber-700"
+            aria-label="Dismiss"
+            onClick={() => setWorldBlocked(0)}
+          >
+            x
+          </button>
+        </div>
+      )}
       {runId && footTooFast && (
         <div
           role="status"

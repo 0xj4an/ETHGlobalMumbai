@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   date,
@@ -350,3 +351,50 @@ export type Player = typeof players.$inferSelect;
 export type NewPlayer = typeof players.$inferInsert;
 export type PlayerWallet = typeof playerWallets.$inferSelect;
 export type NewPlayerWallet = typeof playerWallets.$inferInsert;
+
+// --- ETHGlobal Mumbai: Arkiv, World ID, ENS ------------------------------
+// Hexes whose defense changed and still need writing to Arkiv. Filled in the
+// same transaction as the game write (lib/runs/strengthClaim.ts), drained by
+// scripts/arkiv-sync.ts. A failed Arkiv write never fails or slows a claim.
+export const arkivQueue = pgTable("arkiv_queue", {
+  h3Id: text("h3_id").primaryKey(),
+  queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+});
+
+// The Arkiv entity that mirrors one hex's defense (ADR-0001).
+export const arkivEntities = pgTable(
+  "arkiv_entities",
+  {
+    h3Id: text("h3_id").primaryKey(),
+    entityKey: text("entity_key").notNull(),
+    expiresAtBlock: bigint("expires_at_block", { mode: "bigint" }).notNull(),
+    needsExtend: boolean("needs_extend").notNull().default(false),
+    level: integer("level").notNull(),
+    lastTx: text("last_tx"),
+    syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("arkiv_entities_needs_extend_idx").on(t.needsExtend)],
+);
+
+// One World ID proof per player (ADR-0003). The nullifier is unique: one
+// human cannot back two players' attacks.
+export const worldVerifications = pgTable("world_verifications", {
+  playerKey: text("player_key").primaryKey(),
+  nullifier: text("nullifier").notNull().unique(),
+  credential: text("credential").notNull(),
+  environment: text("environment").notNull(),
+  verifiedAt: timestamp("verified_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// The last leader written to ENS per zone (ADR-0002), so the relayer only
+// pays gas when the leader actually changes.
+export const ensTitles = pgTable("ens_titles", {
+  zone: text("zone").primaryKey(),
+  label: text("label").notNull(),
+  leader: text("leader"),
+  score: integer("score").notNull().default(0),
+  txHash: text("tx_hash"),
+  writtenAt: timestamp("written_at", { withTimezone: true }),
+});

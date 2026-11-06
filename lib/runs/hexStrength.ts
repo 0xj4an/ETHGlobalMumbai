@@ -23,14 +23,34 @@ export const MAX_STRENGTH = 10;
 export const DECAY_DAYS = 30;
 const DAY_MS = 86_400_000;
 
+/**
+ * Demo speed-up for the game clock (ETHGlobal Mumbai demo instance only).
+ * Unset or 1 in production, so nothing changes there. With N, a "day" of the
+ * game lasts DAY_MS / N real milliseconds: decay, the daily action limit and
+ * the Arkiv expiry all run N times faster. Server-side only.
+ */
+export function timeScale(): number {
+  const raw = Number(process.env.DEMO_TIME_SCALE ?? "1");
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1;
+}
+
+/** Real milliseconds in one game day. */
+export function gameDayMs(scale: number = timeScale()): number {
+  return DAY_MS / scale;
+}
+
 export type HexStrengthState = {
   baseStrength: number;
   damage: number;
   reinforcedAt: Date;
 };
 
-export function effectiveStrength(state: HexStrengthState, now: Date): number {
-  const days = Math.max(0, (now.getTime() - state.reinforcedAt.getTime()) / DAY_MS);
+export function effectiveStrength(
+  state: HexStrengthState,
+  now: Date,
+  scale: number = timeScale(),
+): number {
+  const days = Math.max(0, (now.getTime() - state.reinforcedAt.getTime()) / gameDayMs(scale));
   const months = Math.floor(days / DECAY_DAYS);
   const afterDamage = Math.max(1, state.baseStrength - state.damage);
   const decay = Math.min(months, afterDamage - 1);
@@ -44,7 +64,8 @@ export function strengthSql(
   reinforcedAt: SQL | unknown,
 ): SQL<number> {
   const afterDamage = sql`greatest(1, ${base} - ${damage})`;
-  const months = sql`floor(greatest(0, extract(epoch from (now() - ${reinforcedAt}))) / ${DECAY_DAYS * 86_400})::int`;
+  const decaySeconds = (DECAY_DAYS * 86_400) / timeScale();
+  const months = sql`floor(greatest(0, extract(epoch from (now() - ${reinforcedAt}))) / ${decaySeconds})::int`;
   return sql<number>`least(${MAX_STRENGTH}, greatest(1, ${afterDamage} - least(${months}, ${afterDamage} - 1)))::int`;
 }
 

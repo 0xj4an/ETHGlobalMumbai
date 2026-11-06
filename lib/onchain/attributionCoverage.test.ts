@@ -15,6 +15,10 @@ const SCAN_DIRS = ["app", "lib", "scripts"];
 const SKIP_DIRS = new Set(["node_modules", ".next", ".claude", "contracts"]);
 const WRITE_CALL = /\b(sendTransaction|writeContract|sendRawTransaction)\s*\(/;
 const TAGGED = /\b(withAttribution|ATTRIBUTION_SUFFIX)\b/;
+// Ethereum mainnet writes for the ENSv2 zone titles (ETHGlobal Mumbai). The
+// ERC-8021 tag comes from Celo's Attribution Tag Registry and only applies to
+// Celo transactions, so these two files are the only exemptions.
+const NOT_CELO = new Set(["lib/ens/titles.ts", "app/mumbai/ens-setup/page.tsx"]);
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -28,7 +32,9 @@ function walk(dir: string, out: string[] = []): string[] {
 
 describe("attribution coverage", () => {
   const files = SCAN_DIRS.flatMap((d) => walk(join(ROOT, d)));
-  const writers = files.filter((f) => WRITE_CALL.test(readFileSync(f, "utf8")));
+  const writers = files.filter(
+    (f) => WRITE_CALL.test(readFileSync(f, "utf8")) && !NOT_CELO.has(relative(ROOT, f)),
+  );
 
   it("finds the known transaction call sites", () => {
     // Guards the scan itself: if this drops to zero the regex broke, not the app.

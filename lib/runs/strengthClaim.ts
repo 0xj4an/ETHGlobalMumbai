@@ -1,17 +1,23 @@
 import { inArray, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
-import { hexActions, hexes } from "@/lib/db/schema";
+import { isArkivSyncEnabled } from "@/lib/arkiv/config";
+import { arkivQueue, hexActions, hexes } from "@/lib/db/schema";
 import {
   type HexAction,
   type HexPlan,
   effectiveStrength,
   planHexAction,
   playerKey,
+  timeScale,
 } from "@/lib/runs/hexStrength";
 import { localDay } from "@/lib/runs/streakMath";
 
 export type StrengthOutcome = {
-  action: HexAction | "repeat";
+  /**
+   * `blocked`: an attack (or a capture of another player's block) that did
+   * not count because the player has no World ID proof (WORLD_GATE=on).
+   */
+  action: HexAction | "repeat" | "blocked";
   /** Level after this pass, 1-10. */
   strength: number;
   /** The block belongs to this player after the pass. */
@@ -26,6 +32,8 @@ export type StrengthBatchResult = {
   conquests: number;
   reinforced: number;
   damaged: number;
+  /** Attacks that did not count for lack of a World ID proof. */
+  blocked: number;
 };
 
 type Db = PgDatabase<PgQueryResultHKT, Record<string, never>>;
@@ -51,9 +59,15 @@ export async function applyStrengthBatch(
     h3Ids: string[];
     geo: (h3: string) => { country: string | null; city: string | null };
     now: Date;
+    /**
+     * False when attacks need a World ID proof the player does not have.
+     * Captures of free blocks and reinforces stay open. Default true.
+     */
+    canAttack?: boolean;
   },
 ): Promise<StrengthBatchResult> {
   const { runId, actor, playerAddresses, timeZone, now } = params;
+  const canAttack = params.canAttack ?? true;
   const ids = Array.from(new Set(params.h3Ids.filter(Boolean)));
   const out: StrengthBatchResult = {
     byH3: new Map(),
@@ -61,6 +75,7 @@ export async function applyStrengthBatch(
     conquests: 0,
     reinforced: 0,
     damaged: 0,
+    blocked: 0,
   };
   if (ids.length === 0) return out;
 
@@ -96,12 +111,36 @@ export async function applyStrengthBatch(
       plans.set(h3, { ...plan, ownedByActor, exists: !!row });
     }
 
+    // World ID gate: an attack, or a capture of another player's level-1
+    // block, does nothing and uses no daily action.
+    const blockedIds = new Set<string>();
+    if (!canAttack) {
+      for (const h3 of ids) {
+        const plan = plans.get(h3)!;
+        if (plan.action === "attack" || plan.action === "capture") blockedIds.add(h3);
+      }
+    }
+    const actingIds = ids.filter((h3) => !blockedIds.has(h3));
+    for (const h3 of blockedIds) {
+      const row = byId.get(h3)!;
+      out.blocked += 1;
+      out.byH3.set(h3, {
+        action: "blocked",
+        strength: effectiveStrength(row, now),
+        ownedByActor: false,
+      });
+    }
+
     const key = playerKey(playerAddresses, actor);
-    const day = localDay(now.getTime(), timeZone);
+    // With the demo time scale a game day is shorter, so the daily limit
+    // follows the scaled clock. Scale 1 (production) is the same as before.
+    const scale = timeScale();
+    const day = localDay(scale === 1 ? now.getTime() : now.getTime() * scale, timeZone);
+    if (actingIds.length === 0) return;
     const inserted = await tx
       .insert(hexActions)
       .values(
-        ids.map((h3) => ({
+        actingIds.map((h3) => ({
           h3Id: h3,
           playerKey: key,
           day,
@@ -116,7 +155,7 @@ export async function applyStrengthBatch(
     const reinforceByLevel = new Map<number, string[]>();
     const attacks: string[] = [];
 
-    for (const h3 of ids) {
+    for (const h3 of actingIds) {
       const plan = plans.get(h3)!;
       // A block nobody owns is always captured: a missing row cannot be a
       // repeat, whatever the action log says.
@@ -189,6 +228,25 @@ export async function applyStrengthBatch(
         .update(hexes)
         .set({ damage: sql`${hexes.damage} + 1` })
         .where(inArray(hexes.h3Id, attacks));
+    }
+
+    // Arkiv outbox (ADR-0001): every block whose defense changed, written in
+    // this transaction so the mirror can never miss a change. The worker
+    // (scripts/arkiv-sync.ts) reads the committed state and writes Arkiv.
+    if (isArkivSyncEnabled()) {
+      const changed = actingIds.filter((h3) => {
+        const o = out.byH3.get(h3);
+        return o && o.action !== "repeat";
+      });
+      if (changed.length > 0) {
+        await tx
+          .insert(arkivQueue)
+          .values(changed.map((h3) => ({ h3Id: h3 })))
+          .onConflictDoUpdate({
+            target: arkivQueue.h3Id,
+            set: { queuedAt: sql`now()`, attempts: 0, lastError: null },
+          });
+      }
     }
   });
 

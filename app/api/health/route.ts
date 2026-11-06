@@ -4,6 +4,8 @@ import { db } from "@/lib/db";
 import { CHAINS, SUPPORTED_CHAIN_KEYS } from "@/lib/onchain/chains";
 import { isSignerConfigured } from "@/lib/onchain/signer";
 import { relayerFunding } from "@/lib/onchain/sponsor";
+import { isArkivSyncEnabled } from "@/lib/arkiv/config";
+import { arkivEntities, arkivQueue, ensTitles } from "@/lib/db/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -80,6 +82,20 @@ export async function GET() {
   // keeps working, the claim just stops being free.
   const funding = await relayerFunding("celo").catch(() => null);
 
+  // ETHGlobal Mumbai mirrors. Never change `status`: the game works without them.
+  const mirrors = isArkivSyncEnabled()
+    ? await Promise.all([
+        db.select({ n: sql<number>`count(*)::int`, oldest: sql<string | null>`min(${arkivQueue.queuedAt})`, err: sql<string | null>`max(${arkivQueue.lastError})` }).from(arkivQueue),
+        db.select({ n: sql<number>`count(*)::int`, last: sql<string | null>`max(${arkivEntities.syncedAt})` }).from(arkivEntities),
+        db.select({ n: sql<number>`count(*)::int`, last: sql<string | null>`max(${ensTitles.writtenAt})` }).from(ensTitles),
+      ])
+        .then(([[q], [e], [t]]) => ({
+          arkiv: { queued: q.n, oldest_queued: q.oldest, last_error: q.err, entities: e.n, last_sync: e.last },
+          ens: { zones_written: t.n, last_write: t.last },
+        }))
+        .catch(() => null)
+    : null;
+
   const body = {
     status: healthy ? "ok" : "degraded",
     timestamp: new Date().toISOString(),
@@ -95,6 +111,7 @@ export async function GET() {
         }
       : null,
     chains,
+    ...(mirrors ? { mirrors } : {}),
   };
 
   return NextResponse.json(body, { status: healthy ? 200 : 503 });

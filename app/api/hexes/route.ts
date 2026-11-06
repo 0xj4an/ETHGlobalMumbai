@@ -1,5 +1,7 @@
 import { eq, inArray } from "drizzle-orm";
-import { gridDisk, isValidCell } from "h3-js";
+import { cellToParent, gridDisk, isValidCell } from "h3-js";
+import { ZONE_RESOLUTION, isArkivMapEnabled } from "@/lib/arkiv/config";
+import { zoneDefense } from "@/lib/arkiv/zoneCache";
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { hexes, users } from "@/lib/db/schema";
@@ -101,5 +103,34 @@ export async function GET(request: Request) {
 
   const rows = await scoped.where(inArray(hexes.h3Id, gridDisk(near, k)));
   log.info("hexes fetched", { count: rows.length, scoped: "near", k });
+  if (isArkivMapEnabled() && rows.length > 0) {
+    return jsonBody(request, packJson({ hexes: await withArkivLevels(rows), source: "arkiv" }), SCOPED_CACHE);
+  }
   return jsonBody(request, packJson({ hexes: rows }), SCOPED_CACHE);
+}
+
+/**
+ * ETHGlobal Mumbai: levels on the run map come from Arkiv, not from the
+ * database. A block with no entity is level 1 (an expired entity means the
+ * block decayed to 1, still owned). If Arkiv cannot be read, the database
+ * levels are served so the map never breaks.
+ */
+async function withArkivLevels<T extends { h3: string }>(
+  rows: T[],
+): Promise<Array<T & { strength?: number; arkivKey?: string }>> {
+  const zones = Array.from(new Set(rows.map((r) => cellToParent(r.h3, ZONE_RESOLUTION))));
+  try {
+    const maps = await Promise.all(zones.map((z) => zoneDefense(z)));
+    const all = new Map<string, { level: number; entityKey: string }>();
+    for (const m of maps) for (const [h3, d] of m) all.set(h3, d);
+    return rows.map((r) => {
+      const d = all.get(r.h3);
+      return { ...r, strength: d ? d.level : 1, ...(d ? { arkivKey: d.entityKey } : {}) };
+    });
+  } catch (e) {
+    log.warn("arkiv read failed, serving db levels", {
+      error: (e instanceof Error ? e.message : String(e)).slice(0, 200),
+    });
+    return rows;
+  }
 }
